@@ -30,7 +30,7 @@
 //! This library returns [`Cow`](https://doc.rust-lang.org/stable/std/borrow/enum.Cow.html) to avoid allocating when decoding/encoding is not needed. Call `.into_owned()` on the `Cow` to get a `Vec` or `String`.
 
 mod enc;
-pub use enc::{encode, encode_binary, Encoded};
+pub use enc::{encode, encode_binary, encode_exclude, Encoded};
 
 mod dec;
 pub use dec::{decode, decode_binary};
@@ -114,15 +114,34 @@ mod tests {
         assert_eq!("hello", Encoded("hello").to_string());
         assert_eq!("hello", format!("{}", Encoded("hello")));
         assert_eq!("hello", Encoded("hello").to_str());
-        assert!(matches!(Encoded("hello").to_str(), std::borrow::Cow::Borrowed(_)));
+        assert!(matches!(
+            Encoded("hello").to_str(),
+            std::borrow::Cow::Borrowed(_)
+        ));
     }
 
     #[test]
     fn whatwg_examples() {
         assert_eq!(*decode_binary(b"%25%s%1G"), b"%%s%1G"[..]);
-        assert_eq!(*decode_binary("‽%25%2E".as_bytes()), b"\xE2\x80\xBD\x25\x2E"[..]);
+        assert_eq!(
+            *decode_binary("‽%25%2E".as_bytes()),
+            b"\xE2\x80\xBD\x25\x2E"[..]
+        );
         assert_eq!(encode("≡"), "%E2%89%A1");
         assert_eq!(encode("‽"), "%E2%80%BD");
         assert_eq!(encode("Say what‽"), "Say%20what%E2%80%BD");
+    }
+
+    #[test]
+    fn test_encode_exclude() {
+        assert_eq!(
+            encode_exclude("exclude the - and space chars", &['-', ' ']),
+            "exclude the - and space chars",
+        );
+
+        assert_eq!(
+            encode_exclude("admin/super valid/make-hyphen/path", &['/']),
+            "admin/super%20valid/make-hyphen/path",
+        );
     }
 }

@@ -1,6 +1,10 @@
 use std::borrow::Cow;
 use std::{fmt, io, str};
 
+const fn ascii_checker(c: &&u8) -> bool {
+    matches!(c, b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z' |  b'-' | b'.' | b'_' | b'~')
+}
+
 /// Wrapper type that implements `Display`. Encodes on the fly, without allocating.
 /// Percent-encodes every byte except alphanumerics and `-`, `_`, `.`, `~`. Assumes UTF-8 encoding.
 ///
@@ -23,7 +27,7 @@ impl<Str: AsRef<[u8]>> Encoded<Str> {
 
     #[inline(always)]
     pub fn to_str(&self) -> Cow<'_, str> {
-        encode_binary(self.0.as_ref())
+        encode_binary_internal(self.0.as_ref(), ascii_checker)
     }
 
     /// Perform urlencoding to a string
@@ -36,14 +40,16 @@ impl<Str: AsRef<[u8]>> Encoded<Str> {
     /// Perform urlencoding into a writer
     #[inline]
     pub fn write<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
-        encode_into(self.0.as_ref(), false, |s| writer.write_all(s.as_bytes()))?;
+        encode_into(self.0.as_ref(), false, ascii_checker, |s| {
+            writer.write_all(s.as_bytes())
+        })?;
         Ok(())
     }
 
     /// Perform urlencoding into a string
     #[inline]
     pub fn append_to(&self, string: &mut String) {
-        append_string(self.0.as_ref(), string, false);
+        append_string(self.0.as_ref(), string, false, ascii_checker);
     }
 }
 
@@ -59,7 +65,7 @@ impl<'a> Encoded<&'a str> {
 
 impl<String: AsRef<[u8]>> fmt::Display for Encoded<String> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        encode_into(self.0.as_ref(), false, |s| f.write_str(s))?;
+        encode_into(self.0.as_ref(), false, ascii_checker, |s| f.write_str(s))?;
         Ok(())
     }
 }
@@ -70,17 +76,29 @@ impl<String: AsRef<[u8]>> fmt::Display for Encoded<String> {
 #[inline(always)]
 #[must_use]
 pub fn encode(data: &str) -> Cow<'_, str> {
-    encode_binary(data.as_bytes())
+    encode_binary_internal(data.as_bytes(), ascii_checker)
+}
+
+#[inline]
+#[must_use]
+pub fn encode_exclude<'a>(data: &'a str, exclude: &'a [char]) -> Cow<'a, str> {
+    encode_binary_internal(data.as_bytes(), |c| {
+        ascii_checker(c) || exclude.contains(&(**c as char))
+    })
 }
 
 /// Percent-encodes every byte except alphanumerics and `-`, `_`, `.`, `~`.
 #[inline]
 #[must_use]
 pub fn encode_binary(data: &[u8]) -> Cow<'_, str> {
+    encode_binary_internal(data, ascii_checker)    
+}
+
+fn encode_binary_internal(data: &[u8], safety_checker: impl FnMut(&&u8) -> bool) -> Cow<'_, str> {
     // add maybe extra capacity, but try not to exceed allocator's bucket size
     let mut escaped = String::new();
     let _ = escaped.try_reserve(data.len() | 15);
-    let unmodified = append_string(data, &mut escaped, true);
+    let unmodified = append_string(data, &mut escaped, true, safety_checker);
     if unmodified {
         return Cow::Borrowed(unsafe {
             // encode_into has checked it's ASCII
@@ -90,25 +108,35 @@ pub fn encode_binary(data: &[u8]) -> Cow<'_, str> {
     Cow::Owned(escaped)
 }
 
-fn append_string(data: &[u8], escaped: &mut String, may_skip: bool) -> bool {
-    encode_into(data, may_skip, |s| {
+fn append_string(
+    data: &[u8],
+    escaped: &mut String,
+    may_skip: bool,
+    safety_checker: impl FnMut(&&u8) -> bool,
+) -> bool {
+    encode_into(data, may_skip, safety_checker, |s| {
         escaped.push_str(s);
         Ok::<_, std::convert::Infallible>(())
-    }).unwrap()
+    })
+    .unwrap()
 }
 
-fn encode_into<E>(mut data: &[u8], may_skip_write: bool, mut push_str: impl FnMut(&str) -> Result<(), E>) -> Result<bool, E> {
+fn encode_into<E>(
+    mut data: &[u8],
+    may_skip_write: bool,
+    mut safety_checker: impl FnMut(&&u8) -> bool,
+    mut push_str: impl FnMut(&str) -> Result<(), E>,
+) -> Result<bool, E> {
     let mut pushed = false;
     loop {
         // Fast path to skip over safe chars at the beginning of the remaining string
-        let ascii_len = data.iter()
-            .take_while(|&&c| matches!(c, b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z' |  b'-' | b'.' | b'_' | b'~')).count();
+        let ascii_len = data.iter().take_while(|c| safety_checker(c)).count();
 
         let (safe, rest) = if ascii_len >= data.len() {
             if !pushed && may_skip_write {
                 return Ok(true);
             }
-            (data, &[][..]) // redundatnt to optimize out a panic in split_at
+            (data, &[][..]) // redundant to optimize out a panic in split_at
         } else {
             data.split_at(ascii_len)
         };
@@ -125,7 +153,7 @@ fn encode_into<E>(mut data: &[u8], may_skip_write: bool, mut push_str: impl FnMu
                 let enc = &[b'%', to_hex_digit(byte >> 4), to_hex_digit(byte & 15)];
                 push_str(unsafe { str::from_utf8_unchecked(enc) })?;
                 data = rest;
-            },
+            }
             None => break,
         };
     }
