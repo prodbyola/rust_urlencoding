@@ -79,6 +79,7 @@ pub fn encode(data: &str) -> Cow<'_, str> {
     encode_binary_internal(data.as_bytes(), ascii_checker)
 }
 
+/// The same as [encode] but allows you to specify characters to exclude from encoding.
 #[inline]
 #[must_use]
 pub fn encode_exclude<'a>(data: &'a str, exclude: &'a [char]) -> Cow<'a, str> {
